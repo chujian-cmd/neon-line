@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MLSD Diagnostic</title>
+<style>
+  body{margin:0;background:#111;color:#0f0;font:13px monospace;padding:10px}
+  #log{white-space:pre-wrap;line-height:1.6}
+</style>
+</head>
+<body>
+<div id="log">开始…</div>
+
+<script>
+const logEl = document.getElementById('log');
+const t0 = performance.now();
+function log(s){
+  const dt = ((performance.now()-t0)/1000).toFixed(2);
+  logEl.textContent += `\n[+${dt}s] ${s}`;
+  console.log(s);
+}
+
+window.onerror = (msg, src, line) => {
+  log(`❌ JS 错误: ${msg} (${src}:${line})`);
+};
+
+log('页面已加载');
+log('准备加载 ort.min.js …');
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js"
+        onload="log('✅ ort.min.js 加载完成');"
+        onerror="log('❌ ort.min.js 加载失败');"></script>
+
+<script>
+if (window.ort) {
+  log('ort 已存在，版本: ' + (ort.env ? 'env ok' : 'no env'));
+  log('开始加载模型…');
+  ort.InferenceSession.create('./model_512x512_large.onnx', { executionProviders: ['wasm'] })
+    .then(s => {
+      log('✅ 模型加载成功');
+      log('输入: ' + s.inputNames.join(','));
+      log('输出: ' + s.outputNames.join(','));
+    })
+    .catch(e => {
+      log('❌ 模型加载失败: ' + e.message);
+    });
+} else {
+  log('⚠️ 脚本执行时 ort 还不存在，等 onload 后检查');
+  window.addEventListener('load', () => {
+    log('window load 触发，ort = ' + (typeof ort));
+  });
+}
+</script>
+</body>
+</html>

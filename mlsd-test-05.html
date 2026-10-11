@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MLSD WebGPU Test</title>
+<style>
+  body{margin:0;background:#111;color:#0f0;font:13px monospace;padding:10px}
+  canvas{max-width:100%;border:1px solid #0f0;display:block;margin:8px 0}
+  input[type=file]{color:#0f0}
+  #log{white-space:pre-wrap;line-height:1.5;margin-top:8px}
+</style>
+</head>
+<body>
+<input type="file" id="file" accept="image/*">
+<canvas id="out"></canvas>
+<div id="log">加载模型…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js"></script>
+<script>
+const logEl = document.getElementById('log');
+const canvas = document.getElementById('out');
+const ctx = canvas.getContext('2d');
+let session = null, lastImg = null;
+
+function log(s){ console.log(s); logEl.textContent += '\n' + s; }
+
+(async () => {
+  log('WebGPU 支持: ' + (navigator.gpu ? '是' : '否'));
+
+  const backends = navigator.gpu ? ['webgpu', 'wasm'] : ['wasm'];
+  for (const ep of backends){
+    try {
+      log('尝试 ' + ep + ' …');
+      const t0 = performance.now();
+      session = await ort.InferenceSession.create(
+        './model_512x512_large.onnx',
+        { executionProviders: [ep] }
+      );
+      log('✅ ' + ep + ' 加载成功，' + (performance.now()-t0).toFixed(0) + ' ms');
+      break;
+    } catch(e){
+      log('❌ ' + ep + ' 失败: ' + e.message);
+    }
+  }
+  if (!session) log('全部失败');
+  else log('选图片测试速度');
+})();
+
+document.getElementById('file').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => { lastImg = img; runOnce(); };
+  img.src = URL.createObjectURL(f);
+});
+
+async function runOnce(){
+  const SIZE = 512;
+  canvas.width = SIZE; canvas.height = SIZE;
+  ctx.drawImage(lastImg, 0, 0, SIZE, SIZE);
+  const imgData = ctx.getImageData(0, 0, SIZE, SIZE);
+
+  const data = new Float32Array(SIZE*SIZE*4);
+  for (let i = 0; i < SIZE*SIZE; i++){
+    data[i*4]   = imgData.data[i*4]  /255;
+    data[i*4+1] = imgData.data[i*4+1]/255;
+    data[i*4+2] = imgData.data[i*4+2]/255;
+    data[i*4+3] = imgData.data[i*4+3]/255;
+  }
+  const feeds = {};
+  feeds[session.inputNames[0]] = new ort.Tensor('float32', data, [1,SIZE,SIZE,4]);
+
+  // 跑 3 次取平均
+  log('推理 3 次测速…');
+  let total = 0;
+  let out = null;
+  for (let i = 0; i < 3; i++){
+    const t0 = performance.now();
+    out = await session.run(feeds);
+    const dt = performance.now() - t0;
+    total += dt;
+    log('  第 ' + (i+1) + ' 次: ' + dt.toFixed(0) + ' ms');
+  }
+  log('平均: ' + (total/3).toFixed(0) + ' ms');
+
+  // 简单验证输出正常
+  const lines = out['Identity'].data;
+  log('Identity 前 8 值: ' + Array.from(lines.slice(0,8)).join(','));
+}
+</script>
+</body>
+</html>

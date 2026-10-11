@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MLSD Test 02</title>
+<style>
+  body{margin:0;background:#111;color:#0f0;font:13px monospace;padding:10px}
+  #log{white-space:pre-wrap;line-height:1.5;margin-top:8px}
+  canvas{max-width:100%;border:1px solid #0f0;display:block;margin:8px 0}
+  input[type=file]{color:#0f0}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  label{color:#0f0}
+  input[type=number]{width:60px;background:#222;color:#0f0;border:1px solid #0f0;padding:2px}
+</style>
+</head>
+<body>
+<div class="row">
+  <input type="file" id="file" accept="image/*">
+  <label>Top N: <input type="number" id="topN" value="30"></label>
+  <label>阈值: <input type="number" id="thresh" value="0" step="0.0001"></label>
+</div>
+<canvas id="out"></canvas>
+<div id="log">加载模型…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js"></script>
+<script>
+const logEl = document.getElementById('log');
+const canvas = document.getElementById('out');
+const ctx = canvas.getContext('2d');
+let session = null;
+let lastImg = null;
+
+function log(s){
+  console.log(s);
+  logEl.textContent += '\n' + s;
+}
+
+(async () => {
+  try {
+    log('加载模型…');
+    session = await ort.InferenceSession.create(
+      './model_512x512_large.onnx',
+      { executionProviders: ['wasm'] }
+    );
+    log('OK 加载完成，选图片');
+  } catch(e){
+    log('加载失败: ' + e.message);
+  }
+})();
+
+document.getElementById('file').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => { lastImg = img; runOnce(); };
+  img.src = URL.createObjectURL(f);
+});
+
+document.getElementById('topN').addEventListener('input', runOnce);
+document.getElementById('thresh').addEventListener('input', runOnce);
+
+async function runOnce(){
+  if (!session || !lastImg){ return; }
+
+  const SIZE = 512;
+  canvas.width = SIZE;
+  canvas.height = SIZE;
+  ctx.drawImage(lastImg, 0, 0, SIZE, SIZE);
+
+  const imgData = ctx.getImageData(0, 0, SIZE, SIZE);
+  const data = new Float32Array(SIZE * SIZE * 4);
+  for (let i = 0; i < SIZE * SIZE; i++){
+    data[i*4]     = imgData.data[i*4]   / 255;
+    data[i*4 + 1] = imgData.data[i*4+1] / 255;
+    data[i*4 + 2] = imgData.data[i*4+2] / 255;
+    data[i*4 + 3] = imgData.data[i*4+3] / 255;
+  }
+
+  const inputName = session.inputNames[0];
+  const tensor = new ort.Tensor('float32', data, [1, SIZE, SIZE, 4]);
+  const feeds = {};
+  feeds[inputName] = tensor;
+
+  const t0 = performance.now();
+  let out;
+  try {
+    out = await session.run(feeds);
+  } catch(e){
+    log('推理失败: ' + e.message);
+    return;
+  }
+  const dt = performance.now() - t0;
+
+  const lines  = out['Identity'].data;    // [1,200,2] int32
+  const scores = out['Identity_1'].data;  // [1,200] float32
+  const N = 200;
+
+  // 按分数排序
+  const idx = Array.from({length: N}, (_, i) => i)
+    .sort((a,b) => scores[b] - scores[a]);
+
+  const topN = parseInt(document.getElementById('topN').value) || 30;
+  const thresh = parseFloat(document.getElementById('thresh').value) || 0;
+
+  // 重画原图（先清掉上一次画的线）
+  ctx.drawImage(lastImg, 0, 0, SIZE, SIZE);
+
+  // 画线
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#00ff88';
+  ctx.shadowColor = '#00ff88';
+  ctx.shadowBlur = 8;
+
+  let drawn = 0;
+  for (let k = 0; k < topN && k < N; k++){
+    const i = idx[k];
+    if (scores[i] < thresh) break;
+
+    // 每两条数字一个端点？先确认结构：lines 是 [1,200,2]，也就是每条线只有一个 (x,y)？不，是 [1,200,2]
+    // 实际上 200 条线 x 每条线 2 个数字，这解释不通。
+    // 看值：3,25, 0,255, 4,49 ... 像是一堆坐标对
+    // 先按每条线 = 2 个点 (x1,y1),(x2,y2) 来画 —— 但 shape 是 [1,200,2]，只有 2 个数字
+    // 所以可能是每条线只给了 2 个坐标中的一个点？或者 200 是 100 条线 x 2 个点
+    // 先按「200 个点，两两成线」画
+    const x1 = lines[k*2],     y1 = lines[k*2+1];
+    // 后续要再看实际形状
+    drawn++;
+  }
+  log('推理 ' + dt.toFixed(0) + ' ms，前 5 分数: ' +
+      Array.from(scores.slice(0,5)).map(v=>v.toFixed(4)).join(', '));
+}
+</script>
+</body>
+</html>

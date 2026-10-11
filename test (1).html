@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Three.js WebXR AR 命中测试 - 最简版</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 30px;
+            pointer-events: none;
+            z-index: 100;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+        #info span {
+            color: #ff4d4d;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <span>⚡ AR 命中测试</span> | 半透明红色平面
+    </div>
+
+    <!-- 引入 Three.js 核心库和扩展 -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.128.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.128.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+        // 1. 初始化场景、相机、渲染器
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.xr.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // 2. 创建半透明红色平面网格
+        const geometry = new THREE.PlaneGeometry(0.5, 0.5);
+        const material = new THREE.MeshBasicMaterial({
+            color: 0xff0000,
+            transparent: true,
+            opacity: 0.5,
+            side: THREE.DoubleSide,
+            depthWrite: false
+        });
+        const redPlane = new THREE.Mesh(geometry, material);
+        redPlane.visible = false; // 初始不可见，等待命中
+        scene.add(redPlane);
+
+        // 3. 会话变量
+        let hitTestSource = null;
+        let referenceSpace = null;
+
+        // 4. 使用官方 ARButton，它内部处理了很多兼容性问题
+        // 关键修改：只请求 hit-test，去掉 anchors 和 dom-overlay
+        document.body.appendChild(ARButton.createButton(renderer, {
+            requiredFeatures: ['hit-test'],
+            optionalFeatures: []
+        }));
+
+        // 5. 监听会话启动，获取参考空间和 hit-test 源
+        renderer.xr.addEventListener('sessionstart', async () => {
+            const session = renderer.xr.getSession();
+            referenceSpace = renderer.xr.getReferenceSpace();
+            const viewerSpace = await session.requestReferenceSpace('viewer');
+            hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+        });
+
+        // 6. 每帧渲染循环
+        renderer.setAnimationLoop((timestamp, frame) => {
+            if (!frame) return;
+
+            // 每帧获取 hit-test 结果
+            if (hitTestSource && referenceSpace) {
+                const hitTestResults = frame.getHitTestResults(hitTestSource);
+
+                if (hitTestResults.length > 0) {
+                    const hit = hitTestResults[0];
+                    const pose = hit.getPose(referenceSpace);
+
+                    if (pose) {
+                        // 从矩阵中提取位置、旋转、缩放
+                        const position = new THREE.Vector3();
+                        const quaternion = new THREE.Quaternion();
+                        const scale = new THREE.Vector3();
+                        new THREE.Matrix4().fromArray(pose.transform.matrix).decompose(position, quaternion, scale);
+
+                        // 设置平面位置
+                        redPlane.position.copy(position);
+
+                        // 让平面与检测到的平面平行（默认法线是 Z 轴，需要旋转到命中平面的 Y 轴方向）
+                        const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion);
+                        redPlane.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+
+                        redPlane.visible = true;
+                    }
+                } else {
+                    // 没有命中，隐藏平面
+                    redPlane.visible = false;
+                }
+            }
+
+            renderer.render(scene, camera);
+        });
+
+        // 窗口大小调整
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

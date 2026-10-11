@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MLSD Test 03</title>
+<style>
+  body{margin:0;background:#111;color:#0f0;font:13px monospace;padding:10px}
+  #log{white-space:pre-wrap;line-height:1.5;margin-top:8px}
+  canvas{max-width:100%;border:1px solid #0f0;display:block;margin:8px 0}
+  input[type=file]{color:#0f0}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  label{color:#0f0}
+  input[type=number]{width:70px;background:#222;color:#0f0;border:1px solid #0f0;padding:2px}
+</style>
+</head>
+<body>
+<div class="row">
+  <input type="file" id="file" accept="image/*">
+  <label>Top N: <input type="number" id="topN" value="30"></label>
+</div>
+<canvas id="out"></canvas>
+<div id="log">加载模型…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js"></script>
+<script>
+const logEl = document.getElementById('log');
+const canvas = document.getElementById('out');
+const ctx = canvas.getContext('2d');
+let session = null;
+let lastImg = null;
+
+function log(s){
+  console.log(s);
+  logEl.textContent += '\n' + s;
+}
+
+(async () => {
+  try {
+    session = await ort.InferenceSession.create(
+      './model_512x512_large.onnx',
+      { executionProviders: ['wasm'] }
+    );
+    log('OK 加载完成，选图片');
+  } catch(e){
+    log('加载失败: ' + e.message);
+  }
+})();
+
+document.getElementById('file').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => { lastImg = img; runOnce(); };
+  img.src = URL.createObjectURL(f);
+});
+
+document.getElementById('topN').addEventListener('input', () => {
+  if (lastImg) runOnce();
+});
+
+async function runOnce(){
+  if (!session || !lastImg) return;
+
+  const SIZE = 512;
+  canvas.width = SIZE;
+  canvas.height = SIZE;
+  ctx.drawImage(lastImg, 0, 0, SIZE, SIZE);
+
+  const imgData = ctx.getImageData(0, 0, SIZE, SIZE);
+  const data = new Float32Array(SIZE * SIZE * 4);
+  for (let i = 0; i < SIZE * SIZE; i++){
+    data[i*4]     = imgData.data[i*4]   / 255;
+    data[i*4 + 1] = imgData.data[i*4+1] / 255;
+    data[i*4 + 2] = imgData.data[i*4+2] / 255;
+    data[i*4 + 3] = imgData.data[i*4+3] / 255;
+  }
+
+  const inputName = session.inputNames[0];
+  const feeds = {};
+  feeds[inputName] = new ort.Tensor('float32', data, [1, SIZE, SIZE, 4]);
+
+  log('推理中…');
+  const t0 = performance.now();
+  let out;
+  try {
+    out = await session.run(feeds);
+  } catch(e){
+    log('推理失败: ' + e.message);
+    return;
+  }
+  log('OK 推理完成 ' + (performance.now()-t0).toFixed(0) + ' ms');
+
+  const lines  = out['Identity'].data;    // 400 个数字
+  const scores = out['Identity_1'].data;  // 200 个
+
+  // 解读：400 个数字 -> 100 条线，每条 4 个数字
+  const numLines = 100;
+  const topN = Math.min(parseInt(document.getElementById('topN').value) || 30, numLines);
+
+  // 按前 numLines 个分数排序
+  const idx = Array.from({length: numLines}, (_, i) => i)
+    .sort((a,b) => scores[b] - scores[a])
+    .slice(0, topN);
+
+  // 重画原图
+  ctx.drawImage(lastImg, 0, 0, SIZE, SIZE);
+
+  // 画线
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#00ff88';
+  ctx.shadowColor = '#00ff88';
+  ctx.shadowBlur = 6;
+
+  for (const k of idx){
+    const x1 = lines[k*4];
+    const y1 = lines[k*4 + 1];
+    const x2 = lines[k*4 + 2];
+    const y2 = lines[k*4 + 3];
+
+    // 坐标 0~255，映射到 0~512
+    const sx1 = x1 * 2, sy1 = y1 * 2;
+    const sx2 = x2 * 2, sy2 = y2 * 2;
+
+    ctx.beginPath();
+    ctx.moveTo(sx1, sy1);
+    ctx.lineTo(sx2, sy2);
+    ctx.stroke();
+  }
+
+  log('画了 ' + idx.length + ' 条线');
+  // 打印前 5 条线的坐标，方便验证
+  for (let i = 0; i < Math.min(5, idx.length); i++){
+    const k = idx[i];
+    log('线 ' + k + ': (' + lines[k*4] + ',' + lines[k*4+1] + ') -> (' +
+        lines[k*4+2] + ',' + lines[k*4+3] + ')  分数=' + scores[k].toFixed(4));
+  }
+}
+</script>
+</body>
+</html>

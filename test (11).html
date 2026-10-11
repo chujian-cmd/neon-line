@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>地面虚拟线</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;touch-action:none}
+  #cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+  #overlay{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}
+  #status{
+    position:fixed;left:8px;top:8px;right:8px;
+    color:#0f0;background:rgba(0,0,0,.6);
+    font:12px/1.5 monospace;padding:8px;border-radius:6px;
+    white-space:pre-wrap;z-index:10;max-height:45vh;overflow:auto;
+  }
+  #hud{
+    position:fixed;left:8px;bottom:8px;right:8px;
+    color:#fff;font:12px/1.4 monospace;
+    text-shadow:0 0 4px #000;z-index:10;
+  }
+  #reset{
+    position:fixed;right:12px;bottom:12px;z-index:11;
+    padding:10px 16px;border-radius:8px;border:none;
+    background:rgba(0,255,136,.85);color:#000;font-weight:bold;font-size:14px;
+  }
+</style>
+</head>
+<body>
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="overlay"></canvas>
+<div id="status">初始化…</div>
+<div id="hud"></div>
+<button id="reset">重置朝向</button>
+
+<script>
+const video  = document.getElementById('cam');
+const canvas = document.getElementById('overlay');
+const ctx    = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const hudEl    = document.getElementById('hud');
+
+function log(s){ statusEl.textContent += '\n' + s; }
+function setStatus(s){ statusEl.textContent = s; }
+
+// ---------- 环境自检 ----------
+setStatus('环境自检中…');
+log('协议: ' + location.protocol);
+log('是否在 iframe: ' + (window.self !== window.top));
+log('mediaDevices: ' + (navigator.mediaDevices ? 'OK' : '不存在'));
+
+// ---------- 状态 ----------
+let W = 0, H = 0;
+let orientation = { yaw: 0, pitch: 0, roll: 0 };
+let yawOffset = 0, pitchOffset = 0;   // 重置用
+let camReady = false;
+let dead = false;
+
+// ---------- 虚拟线（世界坐标，y=0 地面；z 负方向是玩家前方）----------
+const lines = [
+  { x1: -2, z1: -2, x2:  2, z2: -2 },
+  { x1: -3, z1: -4, x2:  3, z2: -4 },
+  { x1: -1, z1: -6, x2: -1, z2: -2 },
+];
+
+// ---------- 相机参数 ----------
+const CAM_HEIGHT = 1.4;              // 手机离地高度（米）
+const FOV_Y      = 60 * Math.PI/180; // 垂直视场角
+const FOOT_Y_R   = 0.85;             // 脚在画面中的纵向比例
+const LINE_THRESH= 22;               // 判定像素容差
+
+// ---------- 姿态 ----------
+function onOrient(e){
+  const d = Math.PI/180;
+  // alpha 是绕 z, beta 绕 x, gamma 绕 y
+  // 注意：只有 alpha 为 null 时才是真正的异常
+  if (e.alpha === null && e.beta === null && e.gamma === null) return;
+  orientation.yaw   = -((e.alpha||0) - yawOffset)   * d;
+  orientation.pitch =  ((e.beta ||0) - pitchOffset) * d;
+  orientation.roll  =  ((e.gamma||0))                * d;
+}
+window.addEventListener('deviceorientation', onOrient, true);
+// 某些安卓要 absolute 才有数据，两个都监听
+window.addEventListener('deviceorientationabsolute', onOrient, true);
+
+document.getElementById('reset').addEventListener('click', () => {
+  yawOffset   = 0;
+  pitchOffset = 0;
+  // 把当前朝向记为「前方」
+  const d = Math.PI/180;
+  // 重新读取一次当前值作为偏移
+  if (lastEvent) {
+    yawOffset   = lastEvent.alpha || 0;
+    pitchOffset = lastEvent.beta  || 0;
+  }
+  dead = false;
+  log('已重置朝向');
+});
+let lastEvent = null;
+window.addEventListener('deviceorientation', (e)=>{ lastEvent = e; }, true);
+
+// ---------- 投影：世界地面点 -> 屏幕像素 ----------
+function project(wx, wz){
+  // 相机在世界 (0, CAM_HEIGHT, 0)，向前为 -z 方向看
+  // 世界点相对相机
+  let px = wx, py = -CAM_HEIGHT, pz = wz;
+
+  // 先绕世界 X 轴应用 pitch（pitch 正向 = 低头）
+  const cp = Math.cos(orientation.pitch), sp = Math.sin(orientation.pitch);
+  let y1 = py*cp - pz*sp;
+  let z1 = py*sp + pz*cp;
+
+  // 再绕世界 Y 轴应用 yaw
+  const cy = Math.cos(orientation.yaw), sy = Math.sin(orientation.yaw);
+  let x2 =  px*cy + z1*sy;
+  let z2 = -px*sy + z1*cy;
+
+  // 相机看向 -z，所以前方的点 z2 应为负
+  const depth = -z2;
+  if (depth <= 0.05) return null;
+
+  const focal = (H/2) / Math.tan(FOV_Y/2);
+  return {
+    x: W/2 + (x2/depth) * focal,
+    y: H/2 - (y1/depth) * focal,
+    depth
+  };
+}
+
+// ---------- 点到线段距离 ----------
+function segDist(px,py,ax,ay,bx,by){
+  const dx=bx-ax, dy=by-ay, l2=dx*dx+dy*dy;
+  if(l2===0) return Math.hypot(px-ax,py-ay);
+  let t=((px-ax)*dx+(py-ay)*dy)/l2;
+  t=Math.max(0,Math.min(1,t));
+  return Math.hypot(px-(ax+t*dx), py-(ay+t*dy));
+}
+
+// ---------- 每帧 ----------
+function frame(){
+  if (W !== innerWidth || H !== innerHeight){
+    W = canvas.width  = innerWidth;
+    H = canvas.height = innerHeight;
+  }
+
+  ctx.clearRect(0,0,W,H);
+
+  const focal = (H/2) / Math.tan(FOV_Y/2);
+
+  // 画线
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'round';
+  ctx.shadowBlur = 12;
+
+  const footX = W/2;
+  const footY = H*FOOT_Y_R;
+  let onLine = false;
+
+  for (const L of lines){
+    const a = project(L.x1, L.z1);
+    const b = project(L.x2, L.z2);
+    if (!a || !b) continue;
+
+    const isHit = segDist(footX,footY,a.x,a.y,b.x,b.y) < LINE_THRESH;
+    if (isHit) onLine = true;
+
+    ctx.strokeStyle = isHit ? '#ff3344' : '#00ff88';
+    ctx.shadowColor = ctx.strokeStyle;
+    ctx.beginPath();
+    ctx.moveTo(a.x,a.y);
+    ctx.lineTo(b.x,b.y);
+    ctx.stroke();
+  }
+
+  if (onLine && !dead) dead = true;
+
+  // 画脚点提示
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = dead ? '#ff3344' : '#ffffff';
+  ctx.beginPath();
+  ctx.arc(footX, footY, 6, 0, Math.PI*2);
+  ctx.fill();
+
+  // 死亡遮罩
+  if (dead){
+    ctx.fillStyle = 'rgba(255,0,0,0.35)';
+    ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 42px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('你死了', W/2, H/2);
+    ctx.font = '16px sans-serif';
+    ctx.fillText('点击右下角「重置朝向」继续', W/2, H/2+36);
+  }
+
+  hudEl.textContent =
+    `yaw ${(orientation.yaw*180/Math.PI).toFixed(0)}°  ` +
+    `pitch ${(orientation.pitch*180/Math.PI).toFixed(0)}°  ` +
+    `cam ${camReady?'OK':'NO'}`;
+
+  requestAnimationFrame(frame);
+}
+
+// ---------- 启动摄像头（多级回退）----------
+async function startCamera(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    setStatus('❌ 摄像头 API 不存在\n' +
+              '原因：不是 HTTPS 安全上下文，或在 iframe 里被限制\n' +
+              '当前：' + location.href);
+    return false;
+  }
+
+  const tries = [
+    { video: { facingMode: { ideal: 'environment' } }, audio:false },
+    { video: { facingMode: 'environment' }, audio:false },
+    { video: true, audio:false },
+  ];
+
+  for (let i=0;i<tries.length;i++){
+    try {
+      setStatus(`尝试打开摄像头 (${i+1}/${tries.length})…`);
+      const stream = await navigator.mediaDevices.getUserMedia(tries[i]);
+      video.srcObject = stream;
+      await video.play();
+      // 等元数据
+      await new Promise(r=>{
+        if (video.videoWidth) return r();
+        video.onloadedmetadata = r;
+        setTimeout(r, 1500);
+      });
+      camReady = true;
+      setStatus('✅ 摄像头 OK  ' + video.videoWidth + 'x' + video.videoHeight);
+      return true;
+    } catch(err){
+      log(`第 ${i+1} 次失败: ${err.name} - ${err.message}`);
+    }
+  }
+  setStatus(statusEl.textContent + '\n\n❌ 全部尝试失败\n' +
+            '如果是 iframe 预览，请部署到独立 https 地址再试');
+  return false;
+}
+
+// ---------- 主流程 ----------
+(async () => {
+  canvas.width  = innerWidth;
+  canvas.height = innerHeight;
+  W = innerWidth; H = innerHeight;
+
+  const ok = await startCamera();
+
+  // 不论相机是否成功，都跑渲染循环（方便看线）
+  requestAnimationFrame(frame);
+
+  if (!ok){
+    // 相机失败时给一个灰底，至少能看见线是否在画
+    video.style.background = '#333';
+  }
+})();
+</script>
+</body>
+</html>

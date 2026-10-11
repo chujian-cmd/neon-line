@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Three.js WebXR AR 命中测试 - 半透明红色平面</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 30px;
+            pointer-events: none;
+            z-index: 100;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+        #info span {
+            color: #ff4d4d;
+            font-weight: bold;
+        }
+        #start-button {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 16px 32px;
+            font-size: 18px;
+            font-weight: 600;
+            background: #ff4d4d;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            z-index: 200;
+            box-shadow: 0 8px 25px rgba(255, 77, 77, 0.5);
+            transition: all 0.3s ease;
+            letter-spacing: 1px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        #start-button:hover {
+            background: #ff3333;
+            box-shadow: 0 12px 30px rgba(255, 77, 77, 0.7);
+            transform: translateX(-50%) scale(1.05);
+        }
+        #start-button:active {
+            transform: translateX(-50%) scale(0.98);
+        }
+        #start-button:disabled {
+            opacity: 0.5;
+            pointer-events: none;
+            background: #888;
+            box-shadow: none;
+        }
+        /* 加载指示器 */
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        #status {
+            margin-left: 10px;
+            font-size: 14px;
+            color: #ccc;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <span>⚡ AR 命中测试</span> | 半透明红色平面 (锚点放置)
+        <div id="status">点击下方按钮开始</div>
+    </div>
+    <button id="start-button">开启 AR 会话</button>
+
+    <!-- 引入 Three.js 核心库和扩展 -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.128.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.128.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+        // --- 初始化场景、相机、渲染器 ---
+        const scene = new THREE.Scene();
+        // 相机使用透视相机，AR 会话中它会自动更新投影矩阵
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+        // 将相机添加到场景？通常不需要，但为了可能的调试可以保留，AR 模式下 Three.js 会处理相机
+        // 但为了不干扰，我们不添加相机到场景中，因为 XR 会管理相机矩阵。
+
+        // 渲染器：开启 alpha 以显示透明背景（真实世界通过摄像头看到）
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.xr.enabled = true;
+
+        // 将渲染器的 canvas 添加到 body
+        document.body.appendChild(renderer.domElement);
+
+        // --- 光照设置 (可选，为了让平面更显眼，但平面是自发光，不依赖光照) ---
+        // 添加一个环境光和一个方向光，不过我们的平面是基础材质，无需光照，但可能场景中有其他物体
+        // 这里不添加额外物体，但保留光照设置以防扩展
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+        directionalLight.position.set(1, 2, 1);
+        scene.add(directionalLight);
+
+        // --- 核心：创建用于命中测试的 reticle（准星）和平面网格 ---
+        
+        // 1. 半透明红色平面网格 (将放置在命中点)
+        // 使用 PlaneGeometry (1x1 米)，然后根据命中结果缩放？或者不做缩放，直接放置 1x1 的平面。
+        // 为了视觉美观，我们创建一个半径为 0.3 米的圆形平面？但题目要求平面网格，用 PlaneGeometry 即可。
+        // 但为了更好看，可以保持方形，或者使用圆形。题目要求是“半透明红色平面网格”，方形也是平面。
+        // 为了更明显，使用 0.5米 x 0.5米 的正方形平面。
+        const planeGeometry = new THREE.PlaneGeometry(0.5, 0.5);
+        const planeMaterial = new THREE.MeshBasicMaterial({
+            color: 0xff0000,
+            transparent: true,
+            opacity: 0.5,
+            side: THREE.DoubleSide, // 双面渲染，以便从各个角度看到
+            depthWrite: false,      // 改善透明叠加效果
+            depthTest: true
+        });
+        const redPlane = new THREE.Mesh(planeGeometry, planeMaterial);
+        
+        // 平面默认是面向 Z 轴正方向？PlaneGeometry 默认面向 Z 轴正向？实际上默认面向 Z 轴正向？不，默认面向 Z 轴正向？
+        // Three.js PlaneGeometry 默认面向 Z 轴正方向。但是 AR 中我们希望平面与检测到的平面平行。
+        // 因此我们通常需要旋转平面使其与水平面平行，或者根据命中结果的朝向调整。
+        // 为了简化并确保平面看起来像是平放在地面上，我们会根据命中结果的姿态设置平面的旋转。
+        // 或者我们让平面始终垂直于命中平面的法线？实际上我们希望平面“躺”在命中平面上。
+        // 即平面的法线应该与命中平面的法线平行。默认平面法线是 (0,0,1)，我们需要旋转使其与命中法线对齐。
+        // 或者我们可以使用一个额外的旋转来让平面平放。更简单的方法：使用 circleGeometry 并旋转使其平放？但为了通用性，
+        // 我们根据命中结果设置 quaternion。稍后在 update 中处理。
+        
+        // 初始不可见，直到有命中
+        redPlane.visible = false;
+        scene.add(redPlane);
+
+        // 2. 添加一个小的圆环作为 reticle 来指示命中点（可选，但不是必须，可以增强交互感）
+        const ringGeometry = new THREE.RingGeometry(0.08, 0.1, 32);
+        const ringMaterial = new THREE.MeshBasicMaterial({
+            color: 0xff4d4d,
+            transparent: true,
+            opacity: 0.8,
+            side: THREE.DoubleSide
+        });
+        const reticle = new THREE.Mesh(ringGeometry, ringMaterial);
+        reticle.rotation.x = -Math.PI / 2; // 让它平躺
+        reticle.visible = false;
+        scene.add(reticle);
+
+        // 我们使用 reticle 来可视化命中位置和方向，但最终平面会放在 reticle 的位置。
+        // 但题目只需要平面网格，不过 reticle 有助于调试。我们保留它但可以隐藏或显示？为了视觉清晰，保留但它是可选的。
+        // 但为了简洁，也可以不要 reticle。但为了更好的体验，保留并且它也会跟随命中点。
+        // 不过题目只要求“放置一个半透明红色平面网格”，所以平面是主角。我们仍然保留 reticle 以指示位置。
+        
+        // 为了符合题意，我们也可以把 reticle 做成不可见，仅用平面。但我会保留它，因为对用户更友好。
+        // 但为了精确符合“每帧获取 hit-test 结果，在命中平面上放置一个半透明红色平面网格”，平面是唯一的物体。
+        // 我决定让 reticle 可见，因为它有助于调试和视觉反馈，但不会干扰主要要求。
+        
+        // --- 设置 AR 按钮和会话 ---
+        const startButton = document.getElementById('start-button');
+        const statusDiv = document.getElementById('status');
+
+        // 定义所需的会话功能
+        const sessionInit = {
+            requiredFeatures: ['hit-test', 'anchors'],
+            optionalFeatures: ['dom-overlay'],
+            domOverlay: { root: document.body } // 允许在 AR 中显示按钮等，但为了简化，可以省略
+        };
+
+        // 使用 ARButton 创建按钮并附加所需功能？但为了更好控制，我们手动处理。
+        // 但是为了方便，我们可以使用 ARButton 但自定义样式和逻辑。
+        // 但 ARButton 会替代我们的按钮，所以我们不用它，我们自己处理。
+        // 实际上 Three.js 提供了 ARButton，但为了自定义按钮和状态，我们自己写点击处理。
+        // 但为了简化 WebXR 会话启动，我们使用 ARButton 的 createButton 方法? 不，我们直接用原生 API。
+
+        let currentSession = null;
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+        let referenceSpace = null;
+
+        // 启动 AR 会话的函数
+        async function startAR() {
+            if (!navigator.xr) {
+                statusDiv.textContent = '您的浏览器不支持 WebXR';
+                startButton.disabled = true;
+                return;
+            }
+
+            // 检查是否支持 immersive-ar
+            const supported = await navigator.xr.isSessionSupported('immersive-ar');
+            if (!supported) {
+                statusDiv.textContent = 'immersive-ar 不被支持';
+                startButton.disabled = true;
+                return;
+            }
+
+            try {
+                // 请求会话，带有必需功能
+                const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
+                currentSession = session;
+                statusDiv.innerHTML = 'AR 会话已启动 <span class="loading"></span>';
+
+                // 设置渲染器的 XR 会话
+                renderer.xr.setReferenceSpaceType('local');
+                await renderer.xr.setSession(session);
+
+                // 获取参考空间
+                referenceSpace = renderer.xr.getReferenceSpace();
+
+                // 请求 hit-test 源
+                // 注意：'viewer' 表示从设备摄像头/视角进行命中测试
+                const viewerSpace = await session.requestReferenceSpace('viewer');
+                hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+                
+                // 会话结束时的清理
+                session.addEventListener('end', () => {
+                    currentSession = null;
+                    hitTestSource = null;
+                    referenceSpace = null;
+                    hitTestSourceRequested = false;
+                    redPlane.visible = false;
+                    reticle.visible = false;
+                    statusDiv.textContent = '点击下方按钮开始';
+                    startButton.disabled = false;
+                    startButton.textContent = '开启 AR 会话';
+                });
+
+                // 隐藏开始按钮（在 AR 中无法点击，但 DOM overlay 可以，但为简单，隐藏）
+                startButton.style.display = 'none';
+                // 注意：在 immersive-ar 中，DOM 元素默认不可见，除非使用 dom-overlay，但我们没有启用，
+                // 所以按钮会消失。我们通过改变状态提示即可。
+                // 但为了恢复，当会话结束时重新显示按钮。
+                // 但是我们设置了 dom-overlay? 没有，所以按钮在 AR 中不可见是正常的。我们在 end 事件中恢复显示。
+                
+                // 更新状态
+                statusDiv.textContent = '会话中：寻找平面...';
+
+                // 开始渲染循环
+                renderer.setAnimationLoop(renderFrame);
+
+            } catch (error) {
+                console.error('启动 AR 会话失败:', error);
+                statusDiv.textContent = '启动失败: ' + error.message;
+                startButton.disabled = false;
+            }
+        }
+
+        // 渲染循环
+        function renderFrame(timestamp, frame) {
+            // 如果没有会话或帧，直接返回
+            if (!frame || !currentSession) {
+                return;
+            }
+
+            // 获取参考空间（可能已更新）
+            if (!referenceSpace) {
+                referenceSpace = renderer.xr.getReferenceSpace();
+            }
+
+            // 每帧获取 hit-test 结果
+            if (hitTestSource && referenceSpace) {
+                // 获取当前帧的命中测试结果
+                const hitTestResults = frame.getHitTestResults(hitTestSource);
+                
+                if (hitTestResults.length > 0) {
+                    // 使用第一个命中结果
+                    const hit = hitTestResults[0];
+                    // 获取命中姿势（相对于参考空间）
+                    const pose = hit.getPose(referenceSpace);
+
+                    if (pose) {
+                        // 更新 reticle 的位置和旋转
+                        reticle.visible = true;
+                        reticle.matrix.fromArray(pose.transform.matrix);
+                        // 从矩阵中提取位置和四元数
+                        const position = new THREE.Vector3();
+                        const quaternion = new THREE.Quaternion();
+                        const scale = new THREE.Vector3();
+                        reticle.matrix.decompose(position, quaternion, scale);
+                        
+                        // 设置平面位置与 reticle 相同
+                        redPlane.position.copy(position);
+                        
+                        // 设置平面旋转：让平面与命中平面平行。
+                        // 命中姿势的旋转表示该点的法线方向（通常是向上）。默认情况下，姿势的 Y 轴指向法线方向。
+                        // 我们希望平面法线与命中平面的法线一致，即平面的法线（默认是 Z 轴）应该旋转到与命中姿势的 Y 轴对齐？
+                        // 实际上，我们通常希望平面“平躺”在命中平面上，即平面的法线指向命中平面的法线方向（通常向上）。
+                        // 默认 PlaneGeometry 的法线是 (0,0,1)。我们需要旋转使得 (0,0,1) 指向命中姿势的 Y 轴方向（即向上）。
+                        // 或者更简单：我们想让平面水平放置，即法线指向世界坐标的上方向（或者命中姿势的 Y 轴方向）。
+                        // 由于 hit-test 姿势通常来自水平面，其 Y 轴指向向上，所以我们构建一个旋转，使平面法线 (0,0,1) 转向 (0,1,0)？
+                        // 那需要绕 X 轴旋转 -90 度。但为了更通用，我们直接使用命中姿势的旋转？
+                        // 另一种方法：使用四元数 setFromUnitVectors 将 (0,0,1) 转到命中姿势的 Y 轴方向。
+                        // 但是命中姿势的 Y 轴方向是从矩阵中提取的：new THREE.Vector3(0,1,0).applyQuaternion(quaternion)。
+                        // 但这样会导致平面绕自身轴旋转不确定。不过对于平面来说，绕法线旋转不影响外观。
+                        // 所以，我们让平面的法线方向与命中平面的法线方向一致。
+                        
+                        // 从命中姿势四元数中获取法线方向（Y轴）
+                        const hitNormal = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion);
+                        
+                        // 计算将平面法线 (0,0,1) 旋转到 hitNormal 的四元数
+                        const planeQuaternion = new THREE.Quaternion().setFromUnitVectors(
+                            new THREE.Vector3(0, 0, 1),
+                            hitNormal
+                        );
+                        
+                        // 设置平面的旋转
+                        redPlane.quaternion.copy(planeQuaternion);
+                        
+                        // 为了让平面稍微浮在表面上方避免 z-fighting，可以沿法线偏移一点点，但也可以不偏移。
+                        // 为了视觉上更明显，不偏移。
+                        
+                        // 平面可见
+                        redPlane.visible = true;
+                        
+                        // 更新状态文字（每帧更新可能太频繁，但没关系）
+                        statusDiv.textContent = `平面已放置 (命中数: ${hitTestResults.length})`;
+                    } else {
+                        // 没有获取到姿势，隐藏
+                        redPlane.visible = false;
+                        reticle.visible = false;
+                    }
+                } else {
+                    // 没有命中，隐藏平面和 reticle
+                    redPlane.visible = false;
+                    reticle.visible = false;
+                    statusDiv.textContent = '寻找平面...';
+                }
+            }
+
+            // 渲染场景
+            renderer.render(scene, camera);
+        }
+
+        // --- 事件监听和初始化 ---
+        startButton.addEventListener('click', startAR);
+
+        // 检查浏览器支持情况并更新按钮状态
+        if (navigator.xr) {
+            navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+                if (!supported) {
+                    startButton.disabled = true;
+                    statusDiv.textContent = 'immersive-ar 不被支持';
+                } else {
+                    statusDiv.textContent = '点击下方按钮开始';
+                }
+            }).catch(err => {
+                console.error('检查支持时出错:', err);
+                statusDiv.textContent = '检查支持时出错';
+            });
+        } else {
+            startButton.disabled = true;
+            statusDiv.textContent = '您的浏览器不支持 WebXR';
+        }
+
+        // 窗口大小调整处理
+        window.addEventListener('resize', () => {
+            // 在 AR 模式下，renderer.setSize 会自动处理，但为了非 AR 预览，我们也可以更新相机比例
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // 初始化完成提示
+        console.log('Three.js WebXR AR 命中测试示例已加载。');
+    </script>
+</body>
+</html>

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Three.js WebXR AR 命中测试 - 最简版</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 30px;
+            pointer-events: none;
+            z-index: 100;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+        #info span {
+            color: #ff4d4d;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <span>⚡ AR 命中测试</span> | 半透明红色平面
+    </div>
+
+    <!-- 引入 Three.js 核心库和扩展 -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.128.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.128.0/examples/jsm/"
+            }
+        }
+    </script>
+
+<script type="module">
+    import * as THREE from 'three';
+
+    // 1. 基本三件套
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // 2. 红色平面
+    const geometry = new THREE.PlaneGeometry(0.5, 0.5);
+    const material = new THREE.MeshBasicMaterial({
+        color: 0xff0000,
+        transparent: true,
+        opacity: 0.5,
+        side: THREE.DoubleSide
+    });
+    const redPlane = new THREE.Mesh(geometry, material);
+    redPlane.visible = false;
+    scene.add(redPlane);
+
+    // 3. 手写启动按钮，这样点击后能看到真实报错
+    const startButton = document.createElement('button');
+    startButton.textContent = '开启 AR 会话';
+    startButton.style.position = 'absolute';
+    startButton.style.bottom = '30px';
+    startButton.style.left = '50%';
+    startButton.style.transform = 'translateX(-50%)';
+    startButton.style.padding = '16px 32px';
+    startButton.style.fontSize = '18px';
+    startButton.style.background = '#ff4d4d';
+    startButton.style.color = 'white';
+    startButton.style.border = 'none';
+    startButton.style.borderRadius = '50px';
+    startButton.style.cursor = 'pointer';
+    startButton.style.zIndex = '200';
+    document.body.appendChild(startButton);
+
+    // 4. 点击事件，强行请求 immersive-ar
+    startButton.addEventListener('click', async () => {
+        if (!navigator.xr) {
+            alert('当前浏览器不支持 WebXR');
+            return;
+        }
+
+        // 先检查是否支持
+        const supported = await navigator.xr.isSessionSupported('immersive-ar');
+        if (!supported) {
+            alert('当前浏览器/系统不支持 immersive-ar');
+            return;
+        }
+
+        try {
+            // 只请求 hit-test，去掉 anchors 和 dom-overlay
+            const session = await navigator.xr.requestSession('immersive-ar', {
+                requiredFeatures: ['hit-test'],
+                optionalFeatures: []
+            });
+
+            renderer.xr.setReferenceSpaceType('local');
+            await renderer.xr.setSession(session);
+
+            const viewerSpace = await session.requestReferenceSpace('viewer');
+            const hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+            const referenceSpace = renderer.xr.getReferenceSpace();
+
+            renderer.setAnimationLoop((timestamp, frame) => {
+                if (frame && hitTestSource && referenceSpace) {
+                    const results = frame.getHitTestResults(hitTestSource);
+                    if (results.length > 0) {
+                        const pose = results[0].getPose(referenceSpace);
+                        if (pose) {
+                            const position = new THREE.Vector3();
+                            const quaternion = new THREE.Quaternion();
+                            const scale = new THREE.Vector3();
+                            new THREE.Matrix4().fromArray(pose.transform.matrix).decompose(position, quaternion, scale);
+                            redPlane.position.copy(position);
+                            const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion);
+                            redPlane.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+                            redPlane.visible = true;
+                        }
+                    } else {
+                        redPlane.visible = false;
+                    }
+                }
+                renderer.render(scene, camera);
+            });
+
+            startButton.style.display = 'none'; // 隐藏按钮
+
+        } catch (error) {
+            alert('启动失败: ' + error.message);
+            console.error('AR 会话启动失败:', error);
+        }
+    });
+</script>
+</body>
+</html>

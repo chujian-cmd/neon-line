@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MLSD Test 04</title>
+<style>
+  body{margin:0;background:#111;color:#0f0;font:13px monospace;padding:10px}
+  canvas{max-width:100%;border:1px solid #0f0;display:block;margin:8px 0}
+  input[type=file]{color:#0f0}
+  button{background:#222;color:#0f0;border:1px solid #0f0;padding:6px 10px;margin:2px}
+  #log{white-space:pre-wrap;line-height:1.5;margin-top:8px}
+</style>
+</head>
+<body>
+<input type="file" id="file" accept="image/*">
+<div id="btns"></div>
+<canvas id="out"></canvas>
+<div id="log">加载模型…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js"></script>
+<script>
+const logEl = document.getElementById('log');
+const canvas = document.getElementById('out');
+const ctx = canvas.getContext('2d');
+let session = null, lastImg = null;
+let linesData = null, scoresData = null;
+
+function log(s){ console.log(s); logEl.textContent += '\n' + s; }
+
+(async () => {
+  session = await ort.InferenceSession.create('./model_512x512_large.onnx',
+    { executionProviders: ['wasm'] });
+  log('OK 加载完成，选图片');
+})();
+
+document.getElementById('file').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image();
+  img.onload = () => { lastImg = img; runOnce(); };
+  img.src = URL.createObjectURL(f);
+});
+
+async function runOnce(){
+  const SIZE = 512;
+  canvas.width = SIZE; canvas.height = SIZE;
+  ctx.drawImage(lastImg, 0, 0, SIZE, SIZE);
+  const imgData = ctx.getImageData(0, 0, SIZE, SIZE);
+
+  const data = new Float32Array(SIZE*SIZE*4);
+  for (let i = 0; i < SIZE*SIZE; i++){
+    data[i*4]   = imgData.data[i*4]  /255;
+    data[i*4+1] = imgData.data[i*4+1]/255;
+    data[i*4+2] = imgData.data[i*4+2]/255;
+    data[i*4+3] = imgData.data[i*4+3]/255;
+  }
+
+  const feeds = {};
+  feeds[session.inputNames[0]] = new ort.Tensor('float32', data, [1,SIZE,SIZE,4]);
+  log('推理中…');
+  const t0 = performance.now();
+  const out = await session.run(feeds);
+  log('OK ' + (performance.now()-t0).toFixed(0) + ' ms');
+
+  linesData  = out['Identity'].data;
+  scoresData = out['Identity_1'].data;
+
+  // 生成按钮，每条线一个
+  const btns = document.getElementById('btns');
+  btns.innerHTML = '';
+  const N = 100;
+  const idx = Array.from({length:N},(_,i)=>i).sort((a,b)=>scoresData[b]-scoresData[a]).slice(0,10);
+  idx.forEach(k => {
+    const b = document.createElement('button');
+    b.textContent = '线' + k + ' (' + scoresData[k].toFixed(4) + ')';
+    b.onclick = () => drawOne(k);
+    btns.appendChild(b);
+  });
+  drawAll(idx);
+  log('按钮生成，点按钮单独看某条线');
+}
+
+function drawOne(k){
+  const SIZE = 512;
+  ctx.drawImage(lastImg, 0, 0, SIZE, SIZE);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#ff3344';
+  ctx.shadowColor = '#ff3344';
+  ctx.shadowBlur = 10;
+  const x1=linesData[k*4], y1=linesData[k*4+1], x2=linesData[k*4+2], y2=linesData[k*4+3];
+  ctx.beginPath();
+  ctx.moveTo(x1*2, y1*2);
+  ctx.lineTo(x2*2, y2*2);
+  ctx.stroke();
+  log('线 ' + k + ': (' + x1 + ',' + y1 + ') -> (' + x2 + ',' + y2 + ')');
+}
+
+function drawAll(idx){
+  const SIZE = 512;
+  ctx.drawImage(lastImg, 0, 0, SIZE, SIZE);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#00ff88';
+  ctx.shadowBlur = 4;
+  ctx.shadowColor = '#00ff88';
+  ctx.globalAlpha = 0.6;
+  idx.forEach(k => {
+    const x1=linesData[k*4], y1=linesData[k*4+1], x2=linesData[k*4+2], y2=linesData[k*4+3];
+    ctx.beginPath();
+    ctx.moveTo(x1*2, y1*2);
+    ctx.lineTo(x2*2, y2*2);
+    ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+}
+</script>
+</body>
+</html>

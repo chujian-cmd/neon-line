@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>伪 AR - 视频透视 + 姿态追踪</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;}
+  #video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;}
+  #canvas{position:fixed;inset:0;width:100%;height:100%;z-index:1;}
+  #hud{position:fixed;left:8px;top:8px;z-index:2;color:#0f0;
+       font:12px monospace;background:rgba(0,0,0,.5);padding:6px;border-radius:6px;}
+  #start{position:fixed;inset:0;z-index:3;display:flex;align-items:center;
+         justify-content:center;background:#000;color:#0f0;font:16px monospace;}
+</style>
+</head>
+<body>
+<video id="video" playsinline muted></video>
+<canvas id="canvas"></canvas>
+<div id="hud">初始化中…</div>
+<div id="start">点击开始伪 AR</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const hud = document.getElementById('hud');
+const startBtn = document.getElementById('start');
+
+// ---------- 1. 姿态解算 ----------
+const state = {
+  quat: new THREE.Quaternion(),
+  gyro: new THREE.Vector3(),
+  accel: new THREE.Vector3(),
+  gravity: new THREE.Vector3(0, -1, 0),
+  lastT: 0,
+  hasOrientation: false,
+  screenAngle: 0,
+};
+
+function onOrientation(e) {
+  // 优先用绝对朝向，没有就用相对
+  const alpha = e.alpha ?? 0;
+  const beta  = e.beta  ?? 0;
+  const gamma = e.gamma ?? 0;
+
+  // 欧拉 -> 四元数（ZXY 顺序，符合设备坐标系）
+  const euler = new THREE.Euler(
+    THREE.MathUtils.degToRad(beta),
+    THREE.MathUtils.degToRad(alpha),
+    THREE.MathUtils.degToRad(-gamma),
+    'ZXY'
+  );
+  const q = new THREE.Quaternion().setFromEuler(euler);
+
+  // 屏幕旋转补偿
+  const screenQ = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1),
+    THREE.MathUtils.degToRad(-state.screenAngle)
+  );
+  q.multiply(screenQ);
+
+  state.quat.copy(q);
+  state.hasOrientation = true;
+}
+
+function onMotion(e) {
+  const a = e.accelerationIncludingGravity;
+  if (!a) return;
+  state.accel.set(a.x || 0, a.y || 0, a.z || 0);
+
+  // 低通滤波估计重力方向
+  const alpha = 0.85;
+  state.gravity.lerp(state.accel.clone().normalize(), 1 - alpha);
+
+  // 陀螺仪
+  const r = e.rotationRate;
+  if (r) {
+    state.gyro.set(
+      THREE.MathUtils.degToRad(r.beta  || 0),
+      THREE.MathUtils.degToRad(r.alpha || 0),
+      THREE.MathUtils.degToRad(r.gamma || 0)
+    );
+  }
+}
+
+// 用重力方向修正四元数漂移（只修正 roll/pitch）
+function correctDrift(q) {
+  const g = state.gravity.clone().normalize();
+  const target = new THREE.Vector3(0, -1, 0);
+  const corr = new THREE.Quaternion().setFromUnitVectors(target, g);
+  // 只取 5% 修正，避免抖动
+  return q.clone().slerp(q.clone().multiply(corr), 0.05);
+}
+
+// ---------- 2. 摄像头 ----------
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+// ---------- 3. Three.js 场景 ----------
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 100);
+
+// 虚拟物体：一个发光立方体 + 地面网格
+const cube = new THREE.Mesh(
+  new THREE.BoxGeometry(0.3, 0.3, 0.3),
+  new THREE.MeshStandardMaterial({ color: 0x00ffcc, emissive: 0x00ffcc, emissiveIntensity: 2 })
+);
+cube.position.set(0, 0, -2);
+scene.add(cube);
+
+const grid = new THREE.GridHelper(20, 40, 0x00ffcc, 0x004444);
+grid.position.y = -1.5;
+scene.add(grid);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x222222, 2));
+const dir = new THREE.DirectionalLight(0xffffff, 1);
+dir.position.set(0, 1, 0);
+scene.add(dir);
+
+// 相机放在原点，用四元数驱动朝向
+const baseQ = new THREE.Quaternion().setFromEuler(
+  new THREE.Euler(0, 0, 0, 'YXZ')
+);
+
+// ---------- 4. 主循环 ----------
+function tick(t) {
+  requestAnimationFrame(tick);
+
+  if (state.hasOrientation) {
+    let q = state.quat.clone();
+    q = correctDrift(q);
+
+    // 设备坐标系 -> Three.js 相机坐标系
+    // 设备: X右 Y上 Z朝向用户；Three: X右 Y上 Z朝屏幕外
+    const deviceToCam = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(-Math.PI / 2, 0, 0, 'XYZ')
+    );
+    camera.quaternion.copy(deviceToCam.multiply(q));
+  }
+
+  cube.rotation.y += 0.01;
+  cube.rotation.x += 0.005;
+
+  renderer.render(scene, camera);
+
+  hud.textContent =
+    `姿态: ${state.hasOrientation ? 'OK' : '等待'} | ` +
+    `重力: ${state.gravity.x.toFixed(2)},${state.gravity.y.toFixed(2)},${state.gravity.z.toFixed(2)}`;
+}
+requestAnimationFrame(tick);
+
+// ---------- 5. 启动 ----------
+startBtn.addEventListener('click', async () => {
+  startBtn.style.display = 'none';
+  try {
+    await startCamera();
+  } catch (e) {
+    hud.textContent = '摄像头失败: ' + e.message;
+    return;
+  }
+
+  // iOS 需要用户手势里请求权限
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    const p = await DeviceOrientationEvent.requestPermission();
+    if (p !== 'granted') { hud.textContent = '姿态权限被拒'; return; }
+  }
+  if (typeof DeviceMotionEvent !== 'undefined' &&
+      typeof DeviceMotionEvent.requestPermission === 'function') {
+    await DeviceMotionEvent.requestPermission();
+  }
+
+  window.addEventListener('deviceorientation', onOrientation, true);
+  window.addEventListener('devicemotion', onMotion, true);
+
+  state.screenAngle = (screen.orientation?.angle) || window.orientation || 0;
+  window.addEventListener('orientationchange', () => {
+    state.screenAngle = (screen.orientation?.angle) || window.orientation || 0;
+  });
+
+  hud.textContent = '运行中';
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

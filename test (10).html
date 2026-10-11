@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000}
+  #cam,#overlay{position:fixed;inset:0;width:100%;height:100%}
+  #cam{object-fit:cover}
+  #overlay{pointer-events:none}
+</style>
+</head>
+<body>
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="overlay"></canvas>
+<script>
+const video = document.getElementById('cam');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+
+let orientation = { yaw: 0, pitch: 0, roll: 0 };
+let W = 0, H = 0;
+let dead = false;
+
+// ---- 虚拟线（世界坐标，y=0 地面）----
+const lines = [
+  { x1: -2, z1: -2, x2: 2, z2: -2 },
+  { x1: -3, z1: -5, x2: 3, z2: -5 },
+  { x1: -1, z1: -8, x2: -1, z2: -2 },  // 一条沿 z 方向的线
+];
+
+// ---- 相机参数 ----
+const CAM_HEIGHT = 1.4;
+const FOV_Y = 60 * Math.PI / 180;
+
+// ---- 姿态 ----
+window.addEventListener('deviceorientation', (e) => {
+  const d = Math.PI / 180;
+  orientation.yaw   = -(e.alpha || 0) * d;
+  orientation.pitch =  (e.beta  || 0) * d;
+  orientation.roll  =  (e.gamma || 0) * d;
+});
+
+// ---- 投影 ----
+function project(wx, wz) {
+  let px = wx, py = -CAM_HEIGHT, pz = wz;
+
+  const cy = Math.cos(-orientation.pitch), sy = Math.sin(-orientation.pitch);
+  let y1 = py * cy - pz * sy;
+  let z1 = py * sy + pz * cy;
+
+  const cx = Math.cos(-orientation.yaw), sx = Math.sin(-orientation.yaw);
+  let x2 = px * cx + z1 * sx;
+  let z2 = -px * sx + z1 * cx;
+
+  if (z2 <= 0.05) return null;
+
+  const focal = (H / 2) / Math.tan(FOV_Y / 2);
+  return {
+    x: W / 2 + (x2 / z2) * focal,
+    y: H / 2 - (y1 / z2) * focal,
+  };
+}
+
+// ---- 点到线段距离 ----
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const l2 = dx*dx + dy*dy;
+  if (l2 === 0) return Math.hypot(px - ax, py - ay);
+  let t = ((px - ax) * dx + (py - ay) * dy) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t*dx), py - (ay + t*dy));
+}
+
+// ---- 每帧 ----
+function frame() {
+  if (W !== window.innerWidth || H !== window.innerHeight) {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+
+  ctx.clearRect(0, 0, W, H);
+
+  // 画所有虚拟线
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = dead ? '#ff2222' : '#00ff88';
+  ctx.shadowColor = ctx.strokeStyle;
+  ctx.shadowBlur = 12;
+
+  let footOnLine = false;
+  const footX = W / 2, footY = H * 0.85;
+
+  for (const L of lines) {
+    const a = project(L.x1, L.z1);
+    const b = project(L.x2, L.z2);
+    if (!a || !b) continue;
+
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+
+    if (segDist(footX, footY, a.x, a.y, b.x, b.y) < 20) footOnLine = true;
+  }
+
+  if (footOnLine && !dead) dead = true;
+
+  // 死亡提示
+  if (dead) {
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(255,0,0,0.35)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 48px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('你死了', W/2, H/2);
+  }
+
+  requestAnimationFrame(frame);
+}
+
+// ---- 启动相机 ----
+async function start() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: 'environment' } },  // 后置摄像头
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+  requestAnimationFrame(frame);
+}
+
+start();
+</script>
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>陀螺仪 伪 AR - 绝对不崩</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #info { position: absolute; top: 20px; left: 20px; color: white; background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 30px; z-index: 100; }
+        #info span { color: #ff4d4d; font-weight: bold; }
+        #log { position: absolute; bottom: 100px; left: 20px; color: #0f0; font-family: monospace; font-size: 13px; background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 8px; z-index: 100; max-width: 90%; }
+        button { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); padding: 16px 32px; font-size: 18px; font-weight: 600; background: #ff4d4d; color: white; border: none; border-radius: 50px; cursor: pointer; z-index: 200; box-shadow: 0 8px 25px rgba(255, 77, 77, 0.5); }
+    </style>
+</head>
+<body>
+    <div id="info"><span>⚡ 陀螺仪 伪 AR</span> | 不依赖 ARCore，不会崩</div>
+    <div id="log">等待启动...</div>
+    <button id="startBtn">开启伪 AR</button>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.128.0/build/three.module.js" } }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        const logDiv = document.getElementById('log');
+        const log = (msg) => { logDiv.innerHTML = msg; console.log(msg); };
+
+        // 1. 场景
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // 2. 半透明红色平面 (放在正前方 1 米处)
+        const geometry = new THREE.PlaneGeometry(0.5, 0.5);
+        const material = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.5, side: THREE.DoubleSide });
+        const redPlane = new THREE.Mesh(geometry, material);
+        redPlane.position.set(0, 0, -1);
+        scene.add(redPlane);
+
+        // 3. 启动按钮逻辑
+        document.getElementById('startBtn').addEventListener('click', async () => {
+            log('正在请求摄像头权限...');
+            try {
+                // 请求后置摄像头，作为 AR 背景
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' }
+                });
+                
+                // 用摄像头画面作为网页背景
+                const video = document.createElement('video');
+                video.srcObject = stream;
+                video.setAttribute('playsinline', '');
+                video.play();
+                Object.assign(video.style, { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', zIndex: '-1' });
+                document.body.appendChild(video);
+                log('✅ 摄像头已启动！');
+
+                // 监听陀螺仪，让摄像头随手机转动
+                window.addEventListener('deviceorientation', (event) => {
+                    // event.alpha 是左右旋转（罗盘方向），beta 是前后倾斜，gamma 是左右倾斜
+                    // 我们用这三个值来旋转 Three.js 相机
+                    // 注意：不同手机陀螺仪方向可能不同，这里做了通用映射
+                    const alpha = event.alpha ? THREE.MathUtils.degToRad(event.alpha) : 0;
+                    const beta = event.beta ? THREE.MathUtils.degToRad(event.beta) : 0;
+                    const gamma = event.gamma ? THREE.MathUtils.degToRad(event.gamma) : 0;
+
+                    // 让相机跟随手机转动
+                    // 这里做简单映射：beta 控制上下看，gamma 控制左右看
+                    camera.rotation.x = beta;   // 上下
+                    camera.rotation.y = gamma;  // 左右
+                    camera.rotation.z = -alpha; // 旋转
+                    
+                    log(`陀螺仪数据: α=${event.alpha?.toFixed(1)}, β=${event.beta?.toFixed(1)}, γ=${event.gamma?.toFixed(1)}`);
+                });
+
+                // 让红平面在摄像头画面里上下浮动，增强 3D 感
+                let time = 0;
+                renderer.setAnimationLoop(() => {
+                    time += 0.02;
+                    redPlane.position.y = Math.sin(time) * 0.1; // 上下浮动
+                    redPlane.rotation.z = time * 0.5;           // 慢慢旋转
+                    renderer.render(scene, camera);
+                });
+
+                document.getElementById('startBtn').style.display = 'none';
+                log('✅ 伪 AR 已启动！移动手机查看效果');
+            } catch (err) {
+                log(`❌ 启动失败: ${err.message}`);
+                alert('启动失败: ' + err.message);
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>无 ARCore 的 WebXR AR</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        #info { position: absolute; top: 20px; left: 20px; color: white; background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 30px; z-index: 100; font-family: sans-serif; }
+        #info span { color: #ff4d4d; font-weight: bold; }
+        #log { position: absolute; bottom: 100px; left: 20px; color: #0f0; font-family: monospace; font-size: 12px; background: rgba(0,0,0,0.5); padding: 5px; border-radius: 5px; z-index: 100; }
+    </style>
+</head>
+<body>
+    <div id="info"><span>⚡ 终极 AR</span> | 不依赖 ARCore 的平面检测</div>
+    <div id="log">等待点击...</div>
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.128.0/build/three.module.js" } }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        const logDiv = document.getElementById('log');
+        const log = (msg) => { logDiv.innerHTML = msg; console.log(msg); };
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.xr.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // 半透明红色平面
+        const geometry = new THREE.PlaneGeometry(0.5, 0.5);
+        const material = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false });
+        const redPlane = new THREE.Mesh(geometry, material);
+        redPlane.visible = false;
+        scene.add(redPlane);
+
+        const btn = document.createElement('button');
+        btn.textContent = '开启 AR 会话';
+        Object.assign(btn.style, { position: 'absolute', bottom: '30px', left: '50%', transform: 'translateX(-50%)', padding: '16px 32px', fontSize: '18px', fontWeight: '600', background: '#ff4d4d', color: 'white', border: 'none', borderRadius: '50px', cursor: 'pointer', zIndex: '200' });
+        document.body.appendChild(btn);
+
+        let hitTestSource = null;
+        let referenceSpace = null;
+
+        btn.addEventListener('click', async () => {
+            if (!navigator.xr) { alert('浏览器不支持 WebXR'); return; }
+            const supported = await navigator.xr.isSessionSupported('immersive-ar');
+            if (!supported) { alert('浏览器不支持 immersive-ar'); return; }
+
+            try {
+                // 关键：只请求 hit-test，不依赖系统 ARCore 服务
+                const session = await navigator.xr.requestSession('immersive-ar', {
+                    requiredFeatures: ['hit-test'],
+                    optionalFeatures: []
+                });
+                log('✅ 会话创建成功！');
+
+                renderer.xr.setReferenceSpaceType('local');
+                await renderer.xr.setSession(session);
+                
+                const viewerSpace = await session.requestReferenceSpace('viewer');
+                hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+                referenceSpace = renderer.xr.getReferenceSpace();
+                log('✅ 已请求 hit-test 源');
+
+                renderer.setAnimationLoop((timestamp, frame) => {
+                    if (!frame) return;
+                    if (hitTestSource && referenceSpace) {
+                        const results = frame.getHitTestResults(hitTestSource);
+                        if (results.length > 0) {
+                            const pose = results[0].getPose(referenceSpace);
+                            if (pose) {
+                                const pos = new THREE.Vector3();
+                                const quat = new THREE.Quaternion();
+                                new THREE.Matrix4().fromArray(pose.transform.matrix).decompose(pos, quat, new THREE.Vector3());
+                                redPlane.position.copy(pos);
+                                const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
+                                redPlane.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+                                redPlane.visible = true;
+                                log(`✅ 找到平面！位置: ${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}`);
+                            }
+                        } else {
+                            redPlane.visible = false;
+                            log('🔍 正在寻找平面... 请缓慢移动手机');
+                        }
+                    }
+                    renderer.render(scene, camera);
+                });
+                btn.style.display = 'none';
+            } catch (error) {
+                log(`❌ 启动失败: ${error.message}`);
+                alert('启动失败: ' + error.message);
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

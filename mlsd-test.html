@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MLSD Test</title>
+<style>
+  body{margin:0;background:#111;color:#0f0;font:13px monospace;padding:10px}
+  #log{white-space:pre-wrap;line-height:1.5}
+  canvas{max-width:100%;border:1px solid #0f0;display:block;margin:10px 0}
+  input[type=file]{color:#0f0}
+</style>
+</head>
+<body>
+<input type="file" id="file" accept="image/*">
+<canvas id="out"></canvas>
+<div id="log">加载模型…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.0/dist/ort.min.js"></script>
+<script>
+const logEl = document.getElementById('log');
+const canvas = document.getElementById('out');
+const ctx = canvas.getContext('2d');
+let session = null;
+
+function log(s){
+  console.log(s);
+  logEl.textContent += '\n' + s;
+}
+
+(async () => {
+  try {
+    log('加载 model_512x512_large.onnx …');
+    session = await ort.InferenceSession.create(
+      './model_512x512_large.onnx',
+      { executionProviders: ['wasm'] }
+    );
+    log('OK 模型加载成功');
+    log('输入名: ' + session.inputNames.join(', '));
+    log('输出名: ' + session.outputNames.join(', '));
+    for (const n of session.inputNames){
+      const m = session.inputMetadata[n];
+      log('  输入 ' + n + ': [' + m.dimensions.join(', ') + '] ' + m.type);
+    }
+    for (const n of session.outputNames){
+      const m = session.outputMetadata[n];
+      log('  输出 ' + n + ': [' + m.dimensions.join(', ') + '] ' + m.type);
+    }
+    log('');
+    log('选一张图片测试');
+  } catch(e){
+    log('加载失败: ' + e.message);
+  }
+})();
+
+document.getElementById('file').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => runOnce(img);
+  img.src = URL.createObjectURL(f);
+});
+
+async function runOnce(img){
+  if (!session){ log('模型没加载好'); return; }
+
+  const SIZE = 512;
+  canvas.width = SIZE;
+  canvas.height = SIZE;
+  ctx.drawImage(img, 0, 0, SIZE, SIZE);
+
+  const imgData = ctx.getImageData(0, 0, SIZE, SIZE);
+  const N = SIZE * SIZE;
+  const data = new Float32Array(4 * N);
+  for (let i = 0; i < N; i++){
+    data[i]       = imgData.data[i*4]   / 255;
+    data[i + N]   = imgData.data[i*4+1] / 255;
+    data[i + 2*N] = imgData.data[i*4+2] / 255;
+    data[i + 3*N] = imgData.data[i*4+3] / 255;
+  }
+
+  const inputName = session.inputNames[0];
+  const tensor = new ort.Tensor('float32', data, [1, 4, SIZE, SIZE]);
+  const feeds = {};
+  feeds[inputName] = tensor;
+
+  log('推理中…');
+  const t0 = performance.now();
+  let out;
+  try {
+    out = await session.run(feeds);
+  } catch(e){
+    log('推理失败: ' + e.message);
+    return;
+  }
+  log('OK 推理完成 ' + (performance.now()-t0).toFixed(0) + ' ms');
+
+  for (const name of session.outputNames){
+    const t = out[name];
+    log('输出 ' + name + ': shape [' + t.dims.join(', ') + '] type ' + t.type);
+    const arr = t.data;
+    const preview = [];
+    for (let i = 0; i < Math.min(20, arr.length); i++){
+      preview.push(typeof arr[i] === 'number' ? arr[i].toFixed(4) : String(arr[i]));
+    }
+    log('  前20: ' + preview.join(', '));
+  }
+}
+</script>
+</body>
+</html>
