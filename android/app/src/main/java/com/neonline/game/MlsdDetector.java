@@ -13,7 +13,9 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 public class MlsdDetector {
 
@@ -23,8 +25,17 @@ public class MlsdDetector {
     private static final int OUTPUT_SIZE = 256;
     private static final int OUTPUT_CHANNELS = 9;
 
+    // 阈值：中心点 logits 大于这个值，认为是一条线
+    private static final float CENTER_THRESH = 1.0f;
+    // 位移尺度
+    private static final float DIS_SCALE = OUTPUT_SIZE / 2f;
+
     private Interpreter interpreter;
     private float[][][][] outputBuffer;
+
+    public static class Line {
+        public float x1, y1, x2, y2;  // 512x512 坐标系
+    }
 
     public MlsdDetector(Context context) throws IOException {
         MappedByteBuffer model = loadModelFile(context, MODEL_FILE);
@@ -32,15 +43,22 @@ public class MlsdDetector {
         options.setNumThreads(4);
         interpreter = new Interpreter(model, options);
 
-        int[] inputShape = interpreter.getInputTensor(0).shape();
-        int[] outputShape = interpreter.getOutputTensor(0).shape();
-        Log.i(TAG, "input shape: " + Arrays.toString(inputShape));
-        Log.i(TAG, "output shape: " + Arrays.toString(outputShape));
+        Log.i(TAG, "input shape: " + Arrays.toString(interpreter.getInputTensor(0).shape()));
+        Log.i(TAG, "output shape: " + Arrays.toString(interpreter.getOutputTensor(0).shape()));
 
         outputBuffer = new float[1][OUTPUT_CHANNELS][OUTPUT_SIZE][OUTPUT_SIZE];
     }
 
     public void testInference(Bitmap bitmap) {
+        List<Line> lines = detect(bitmap);
+        Log.i(TAG, "detected " + lines.size() + " lines");
+        for (int i = 0; i < Math.min(10, lines.size()); i++) {
+            Line l = lines.get(i);
+            Log.i(TAG, "line " + i + ": (" + l.x1 + "," + l.y1 + ") -> (" + l.x2 + "," + l.y2 + ")");
+        }
+    }
+
+    public List<Line> detect(Bitmap bitmap) {
         Bitmap resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true);
 
         // NCHW: [1, 4, 512, 512]
@@ -50,33 +68,66 @@ public class MlsdDetector {
         int[] pixels = new int[INPUT_SIZE * INPUT_SIZE];
         resized.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE);
 
-        // 通道 R
         for (int p : pixels) input.putFloat(((p >> 16) & 0xFF) / 255f);
-        // 通道 G
         for (int p : pixels) input.putFloat(((p >> 8) & 0xFF) / 255f);
-        // 通道 B
         for (int p : pixels) input.putFloat((p & 0xFF) / 255f);
-        // 通道 A
         for (int p : pixels) input.putFloat(((p >> 24) & 0xFF) / 255f);
-
         input.rewind();
 
-        // 跑推理：输入 + 输出 buffer
         interpreter.run(input, outputBuffer);
 
-        Log.i(TAG, "inference done");
+        // 解码
+        List<Line> lines = new ArrayList<>();
+        float[][][] out = outputBuffer[0];  // [9][256][256]
 
-        // 统计 TP map 中大于 0 的像素数，粗略判断有没有检测到东西
-        int hitCount = 0;
-        float maxVal = -9999;
         for (int y = 0; y < OUTPUT_SIZE; y++) {
             for (int x = 0; x < OUTPUT_SIZE; x++) {
-                float v = outputBuffer[0][0][y][x];
-                if (v > maxVal) maxVal = v;
-                if (v > 0.5f) hitCount++;
+                float centerLogit = out[0][y][x];
+                if (centerLogit < CENTER_THRESH) continue;
+
+                // 解码两个端点
+                float[] p1 = decodeDisplacement(out, x, y, 1);
+                float[] p2 = decodeDisplacement(out, x, y, 5);
+
+                // 输出坐标系 256 -> 输入 512
+                float cx = x * 2f, cy = y * 2f;
+                float x1 = cx + p1[0] * 2f;
+                float y1 = cy + p1[1] * 2f;
+                float x2 = cx + p2[0] * 2f;
+                float y2 = cy + p2[1] * 2f;
+
+                Line l = new Line();
+                l.x1 = x1; l.y1 = y1; l.x2 = x2; l.y2 = y2;
+                lines.add(l);
             }
         }
-        Log.i(TAG, "TP map max=" + maxVal + ", pixels>0.5: " + hitCount);
+
+        // TODO: 非极大值抑制（NMS）去重，先跳过，看效果
+        return lines;
+    }
+
+    /**
+     * 解码端点位移。channels 是 [1,4] 或 [5,8]。
+     * 对 4 个通道做 softmax，乘方向向量。
+     */
+    private float[] decodeDisplacement(float[][][] out, int x, int y, int startCh) {
+        float[] vals = new float[4];
+        float maxV = -9999;
+        for (int i = 0; i < 4; i++) {
+            vals[i] = out[startCh + i][y][x];
+            if (vals[i] > maxV) maxV = vals[i];
+        }
+        float sumExp = 0;
+        for (int i = 0; i < 4; i++) {
+            vals[i] = (float) Math.exp(vals[i] - maxV);
+            sumExp += vals[i];
+        }
+        for (int i = 0; i < 4; i++) vals[i] /= sumExp;
+
+        // 方向：右、左、下、上
+        float dx = (vals[0] - vals[1]) * DIS_SCALE;
+        float dy = (vals[2] - vals[3]) * DIS_SCALE;
+        return new float[]{ dx, dy };
     }
 
     private MappedByteBuffer loadModelFile(Context context, String name) throws IOException {
