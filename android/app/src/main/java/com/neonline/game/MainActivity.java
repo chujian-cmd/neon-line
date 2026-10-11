@@ -1,13 +1,13 @@
 package com.neonline.game;
 
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
+import android.graphics.BitmapFactory;
 import android.os.Bundle;
 import android.util.Log;
 
 import com.getcapacitor.BridgeActivity;
+
+import java.io.InputStream;
 
 public class MainActivity extends BridgeActivity {
 
@@ -21,17 +21,16 @@ public class MainActivity extends BridgeActivity {
             try {
                 MlsdDetector detector = new MlsdDetector(MainActivity.this);
 
-                Bitmap test = Bitmap.createBitmap(512, 512, Bitmap.Config.ARGB_8888);
-                Canvas c = new Canvas(test);
-                c.drawColor(Color.WHITE);
-                Paint p = new Paint();
-                p.setColor(Color.BLACK);
-                p.setStrokeWidth(6);
-                c.drawLine(50, 50, 450, 300, p);
-                c.drawLine(100, 400, 400, 420, p);
-                c.drawLine(200, 100, 220, 500, p);
+                InputStream is = getAssets().open("test.jpg");
+                Bitmap test = BitmapFactory.decodeStream(is);
+                is.close();
 
-                Log.i(TAG, "test bitmap ready, running inference...");
+                if (test == null) {
+                    Log.e(TAG, "failed to load test.jpg");
+                    return;
+                }
+                Log.i(TAG, "test.jpg loaded: " + test.getWidth() + "x" + test.getHeight());
+
                 long t0 = System.currentTimeMillis();
                 detector.testInference(test);
                 Log.i(TAG, "inference total time: " + (System.currentTimeMillis() - t0) + " ms");
